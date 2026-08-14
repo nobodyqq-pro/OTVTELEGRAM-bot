@@ -1,7 +1,6 @@
 import os
-import asyncio
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Updater, CommandHandler, CallbackContext
 import requests
 import threading
 import itertools
@@ -33,43 +32,43 @@ def progress_bar(percent, width=20):
     bar = "█" * filled + "░" * (width - filled)
     return f"[{bar}]"
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
         "🔥 ဒီ bot က Ruijie Wi-Fi portal ကို brute-force လုပ်တယ်။\n"
         "/input <session_url> နဲ့ URL ထည့်ပါ။\n"
         "/scan <6|7|8|all> နဲ့ စတင်ပါ။"
     )
 
-async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_input(update: Update, context: CallbackContext):
     url = update.message.text.replace("/input ", "").strip()
     if url.startswith("http"):
         sessions.append(url)
-        await update.message.reply_text(f"✅ Session URL သိမ်းဆည်းပြီး။ စုစုပေါင်း {len(sessions)} ခု။")
+        update.message.reply_text(f"✅ Session URL သိမ်းဆည်းပြီး။ စုစုပေါင်း {len(sessions)} ခု။")
     else:
-        await update.message.reply_text("❌ တရားဝင် URL မဟုတ်ဘူး။")
+        update.message.reply_text("❌ တရားဝင် URL မဟုတ်ဘူး။")
 
-async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def scan(update: Update, context: CallbackContext):
     global scanning_active, start_time, attempts_since_last, last_progress_time, ban_count
     if scanning_active:
-        await update.message.reply_text("⏳ Scan လုပ်နေပြီးသား။")
+        update.message.reply_text("⏳ Scan လုပ်နေပြီးသား။")
         return
     args = context.args
     if not args:
-        await update.message.reply_text("❌ /scan <6|7|8|all> ကို သုံးပါ။")
+        update.message.reply_text("❌ /scan <6|7|8|all> ကို သုံးပါ။")
         return
     length = args[0]
     if length not in ["6", "7", "8", "all"]:
-        await update.message.reply_text("❌ 6, 7, 8, သို့မဟုတ် all ကိုသာ သုံးပါ။")
+        update.message.reply_text("❌ 6, 7, 8, သို့မဟုတ် all ကိုသာ သုံးပါ။")
         return
     if not sessions:
-        await update.message.reply_text("❌ Session URL မရှိဘူး။ အရင်ဆုံး /input နဲ့ URL ထည့်ပါ။")
+        update.message.reply_text("❌ Session URL မရှိဘူး။ အရင်ဆုံး /input နဲ့ URL ထည့်ပါ။")
         return
     scanning_active = True
     start_time = time.time()
     attempts_since_last = 0
     last_progress_time = time.time()
     ban_count = 0
-    await update.message.reply_text(f"🚀 Scan စတင်ပြီ။ စာလုံးအရေအတွက်: {length}။ (နှေးနှေးသွားမယ်)")
+    update.message.reply_text(f"🚀 Scan စတင်ပြီ။ စာလုံးအရေအတွက်: {length}။ (နှေးနှေးသွားမယ်)")
     thread = threading.Thread(target=bruteforce_worker, args=(update, context, length))
     thread.start()
 
@@ -162,11 +161,13 @@ def bruteforce_worker(update, context, length):
     )
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("input", handle_input))
-    app.add_handler(CommandHandler("scan", scan))
-    app.run_polling()
+    updater = Updater(token=BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("input", handle_input))
+    dp.add_handler(CommandHandler("scan", scan))
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()

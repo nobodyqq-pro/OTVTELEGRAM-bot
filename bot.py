@@ -30,7 +30,7 @@ notify_on = True
 
 # === User/Key Management (in-memory) ===
 users = {}  # user_id: {"key": key, "expiry": datetime, "admin": bool}
-ADMIN_ID = 8572515495  # မင်းရဲ့ Telegram User ID ကို ထည့်ပါ
+ADMIN_ID = 8537971974  # မင်းရဲ့ Telegram User ID ကို ထည့်ပါ
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

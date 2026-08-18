@@ -1,3 +1,18 @@
+
+
+import os
+from flask import Flask
+from threading import Thread
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def keep_alive():
+    port = int(os.environ.get('PORT', 8080))
+    Thread(target=lambda: app.run(host='0.0.0.0', port=port)).start()
 import os
 import asyncio
 import aiohttp
@@ -357,4 +372,5 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
+    keep_alive()
     main()

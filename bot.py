@@ -27,9 +27,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8537971974"))
 
 # ── YOUR SETTINGS ──────────────────────────────────────────────────────
-BATCH_SIZE = 50
-MAX_CONCURRENT = 20
-DELAY_BETWEEN_REQUESTS = 0.1
+BATCH_SIZE = 80
+MAX_CONCURRENT = 30
+DELAY_BETWEEN_REQUESTS = 0.05
 
 # ── GLOBALS ──────────────────────────────────────────────────────────────
 user_data = {}
